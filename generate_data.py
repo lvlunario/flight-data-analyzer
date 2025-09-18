@@ -2,104 +2,81 @@ import pandas as pd
 import numpy as np
 import datetime
 
-def generate_flight_data(filename="flight_data_industrial.csv"):
+def generate_flight_data(filename="flight_data_nordic.csv"):
     """
-    Generates a synthetic, industrial-grade flight data CSV file.
+    Generates an updated, more realistic flight data CSV file.
 
-    This version includes multiple subsystems, payloads, data links,
-    and simulates anomalies, missing data, and classified/redacted data.
+    This version features a multi-leg flight path over the Nordic region
+    and is specifically designed to create dynamic, sustained communication link outages.
     """
-    print("Generating industrial-grade synthetic flight data...")
+    print("Generating new Nordic flight data with sustained comm outages...")
 
     # --- Simulation Parameters ---
-    total_duration_seconds = 7200  # 2-hour flight
+    total_duration_seconds = 9000  # 2.5-hour flight
     data_points = total_duration_seconds * 2 # 2 Hz data rate
-    # Set start time based on current time
-    start_time = datetime.datetime(2025, 9, 18, 20, 54, 0)
+    start_time = datetime.datetime(2025, 10, 22, 8, 0, 0)
     time = np.linspace(0, total_duration_seconds, data_points)
     
-    # --- Base Flight Profile (Position & Altitude) ---
+    # --- Base Flight Profile (Altitude) ---
     altitude = np.zeros(data_points)
-    lat = np.zeros(data_points)
-    lon = np.zeros(data_points)
-    
-    # Profile Phases
-    climb_end_idx = int(data_points * 0.15)    # First 15% of flight
+    climb_end_idx = int(data_points * 0.1)
     cruise_start_idx = climb_end_idx
-    cruise_end_idx = int(data_points * 0.85)   # Cruise until 85% mark
+    cruise_end_idx = int(data_points * 0.9)
     descent_start_idx = cruise_end_idx
 
-    # 1. Takeoff and Climb
-    altitude[:climb_end_idx] = 45000 * (time[:climb_end_idx] / time[climb_end_idx-1])**2
-    
-    # 2. Cruise
-    altitude[cruise_start_idx:cruise_end_idx] = 45000 + np.sin(time[cruise_start_idx:cruise_end_idx]/100) * 200 # slight variation
-    
-    # 3. Descent
+    altitude[:climb_end_idx] = 50000 * np.sin(np.pi/2 * time[:climb_end_idx] / time[climb_end_idx-1])
+    altitude[cruise_start_idx:cruise_end_idx] = 50000 + np.sin(time[cruise_start_idx:cruise_end_idx]/200) * 150
     descent_duration = time[-1] - time[descent_start_idx-1]
-    altitude[descent_start_idx:] = 45000 * (1 - (time[descent_start_idx:] - time[descent_start_idx-1]) / descent_duration)**2
+    altitude[descent_start_idx:] = 50000 * (1 - (time[descent_start_idx:] - time[descent_start_idx-1]) / descent_duration)
     altitude[altitude < 0] = 0
 
-    # Position (starting near City of Binan, Philippines)
-    start_lat, start_lon = 14.33, 121.05
-    lon = start_lon + 0.0015 * time # Fly eastward
-    lat = start_lat - 0.0005 * time # Fly southward
-
-    # --- GNC (Guidance, Navigation, and Control) ---
-    roll = np.random.randn(data_points) * 0.2
-    pitch = np.zeros(data_points)
-    yaw = np.random.randn(data_points) * 0.2 + 135 # Heading South-East
+    # --- Realistic Multi-Leg Flight Path (Position) ---
+    # Start near Oslo, Norway
+    start_lat, start_lon = 59.9, 10.75
+    lat = np.full(data_points, start_lat)
+    lon = np.full(data_points, start_lon)
     
-    # Add a banking turn during cruise
-    turn_start_idx = int(data_points * 0.4)
-    turn_end_idx = int(data_points * 0.5)
-    turn_duration_idx = turn_end_idx - turn_start_idx
-    roll[turn_start_idx:turn_end_idx] = 25 * np.sin(np.pi * np.linspace(0, 1, turn_duration_idx))
+    # Leg 1: Fly South-West (20% of flight)
+    leg1_end_idx = int(data_points * 0.20)
+    lon[:leg1_end_idx] = np.linspace(start_lon, 8.0, leg1_end_idx)
+    lat[:leg1_end_idx] = np.linspace(start_lat, 58.5, leg1_end_idx)
 
-    # --- Propulsion ---
-    engine_rpm = np.zeros(data_points)
-    engine_rpm[:climb_end_idx] = 2000 + 7500 * (time[:climb_end_idx]/time[climb_end_idx-1])
-    engine_rpm[cruise_start_idx:cruise_end_idx] = 9500 + np.random.randn(cruise_end_idx - cruise_start_idx) * 50
-    engine_rpm[descent_start_idx:] = 9500 - 6500 * ((time[descent_start_idx:]-time[descent_start_idx-1])/descent_duration)
-    fuel_flow = (engine_rpm / 1000) * 2.5 + np.random.randn(data_points) * 0.1 # kg/s
+    # Leg 2: Turn and fly South-East (from 20% to 60%)
+    leg2_end_idx = int(data_points * 0.60)
+    lon[leg1_end_idx:leg2_end_idx] = np.linspace(lon[leg1_end_idx-1], 11.0, leg2_end_idx - leg1_end_idx)
+    lat[leg1_end_idx:leg2_end_idx] = np.linspace(lat[leg1_end_idx-1], 57.0, leg2_end_idx - leg1_end_idx)
 
-    # --- Power System ---
-    bus_a_voltage = 28.0 + np.random.randn(data_points) * 0.1
-    bus_b_voltage = 28.0 + np.random.randn(data_points) * 0.1
-    # Simulate a Bus A undervoltage anomaly
-    anomaly_start_idx = int(data_points * 0.6)
-    anomaly_end_idx = int(data_points * 0.62)
-    bus_a_voltage[anomaly_start_idx:anomaly_end_idx] -= 4.0
+    # Leg 3: Second turn, fly West (from 60% to 90%)
+    leg3_end_idx = int(data_points * 0.90)
+    # --- BUG FIX WAS HERE ---
+    lon[leg2_end_idx:leg3_end_idx] = np.linspace(lon[leg2_end_idx-1], 8.5, leg3_end_idx - leg2_end_idx)
+    lat[leg2_end_idx:leg3_end_idx] = np.linspace(lat[leg2_end_idx-1], 57.2, leg3_end_idx - leg2_end_idx)
+    
+    # Final leg: Descend towards destination
+    lon[leg3_end_idx:] = np.linspace(lon[leg3_end_idx-1], 8.3, len(lon) - leg3_end_idx)
+    lat[leg3_end_idx:] = np.linspace(lat[leg3_end_idx-1], 57.1, len(lat) - leg3_end_idx)
 
-    # --- Thermal System ---
-    avionics_temp = 25 + (altitude / 45000) * 15 + np.random.randn(data_points) * 0.5
-    payload_bay_temp = 20 - (altitude / 45000) * 25 + np.random.randn(data_points) * 1.2
+    # --- GNC (with sharp turns) ---
+    roll = np.random.randn(data_points) * 0.5
+    turn1_indices = slice(leg1_end_idx - 100, leg1_end_idx + 100)
+    roll[turn1_indices] = 30 * np.sin(np.pi * np.linspace(0, 1, 200))
+    turn2_indices = slice(leg2_end_idx - 100, leg2_end_idx + 100)
+    roll[turn2_indices] = -25 * np.sin(np.pi * np.linspace(0, 1, 200))
 
-    # --- Communications Links ---
-    # TCDL (Satellite) Link - affected by roll
-    tcdl_margin = 15 - np.abs(roll/10) + np.random.randn(data_points) * 0.2
-    # LOS (Line-of-Sight) Link - affected by altitude/distance
-    los_margin = 20 * (altitude/45000) - 5 + np.random.randn(data_points) * 0.3
+    # --- Communications Links (Sustained Outages) ---
+    # TCDL (Satellite) Link - Sustained outage during the entire second leg
+    tcdl_margin = 15 + np.random.randn(data_points) * 0.2
+    tcdl_outage_indices = slice(leg1_end_idx, leg2_end_idx)
+    tcdl_margin[tcdl_outage_indices] = -5 + np.random.randn(leg2_end_idx - leg1_end_idx) * 0.5 # Deep outage
+    
+    # LOS (Line-of-Sight) Link - Degrades sharply with distance
+    distance_from_start = np.sqrt((lon - start_lon)**2 + (lat - start_lat)**2)
+    los_margin = 20 * (altitude/50000) - (distance_from_start * 8) + np.random.randn(data_points) * 0.3 # More aggressive degradation
     los_margin[los_margin < 0] = 0
 
-    # --- Payloads ---
-    # Activate payloads only mid-cruise
-    pl_active_start_idx = int(data_points * 0.3)
-    pl_active_end_idx = int(data_points * 0.7)
-    
-    # Payload 1: GMTI (Ground Moving Target Indicator)
-    pl_gmti_status = np.full(data_points, "STBY")
-    pl_gmti_status[pl_active_start_idx:pl_active_end_idx] = "ACTIVE"
-    # When Bus A voltage drops, GMTI goes into safe mode
-    pl_gmti_status[anomaly_start_idx:anomaly_end_idx] = "SAFE"
-    pl_gmti_power_draw = np.zeros(data_points)
-    pl_gmti_power_draw[pl_gmti_status == "ACTIVE"] = 500 + np.random.randn(np.sum(pl_gmti_status == "ACTIVE"))*10
-
-    # Payload 2: EISS (Electro-optical Imaging Sensor Suite)
-    pl_eiss_status = np.full(data_points, "OFF")
-    pl_eiss_status[pl_active_start_idx:pl_active_end_idx] = "ACTIVE"
-    pl_eiss_target_coords = np.full(data_points, "NONE")
-    pl_eiss_target_coords[pl_active_start_idx:pl_active_end_idx] = "-999.0" # REDACTED FOR CLASSIFICATION
+    # --- Other Subsystems (Simplified for this update) ---
+    engine_rpm = 9500 + (altitude/50000 * 1000) + np.random.randn(data_points) * 50
+    bus_a_voltage = 28.0 + np.random.randn(data_points) * 0.1
 
     # --- DataFrame Assembly ---
     timestamps = [start_time + datetime.timedelta(seconds=int(s)) for s in time]
@@ -107,24 +84,15 @@ def generate_flight_data(filename="flight_data_industrial.csv"):
     df = pd.DataFrame({
         'Timestamp': timestamps,
         'POS_Latitude_deg': lat, 'POS_Longitude_deg': lon, 'POS_Altitude_ft': altitude,
-        'GNC_Roll_deg': roll, 'GNC_Pitch_deg': pitch, 'GNC_Yaw_deg': yaw,
-        'PROP_Engine_RPM': engine_rpm, 'PROP_FuelFlow_kgs': fuel_flow,
-        'POWER_BusA_Voltage_V': bus_a_voltage, 'POWER_BusB_Voltage_V': bus_b_voltage,
-        'THERMAL_Avionics_C': avionics_temp, 'THERMAL_PayloadBay_C': payload_bay_temp,
-        'COMM_TCDL_Margin_dB': tcdl_margin, 'COMM_LOS_Margin_dB': los_margin,
-        'PL_GMTI_Status': pl_gmti_status, 'PL_GMTI_Power_W': pl_gmti_power_draw,
-        'PL_EISS_Status': pl_eiss_status, 'PL_EISS_Target_Coords': pl_eiss_target_coords,
+        'GNC_Roll_deg': roll,
+        'PROP_Engine_RPM': engine_rpm,
+        'POWER_BusA_Voltage_V': bus_a_voltage,
+        'COMM_TCDL_Margin_dB': tcdl_margin,
+        'COMM_LOS_Margin_dB': los_margin,
     })
-
-    # --- Introduce Missing Data ---
-    sensor_cols = [col for col in df.columns if col not in ['Timestamp', 'PL_GMTI_Status', 'PL_EISS_Status', 'PL_EISS_Target_Coords']]
-    for col in sensor_cols:
-        if np.random.rand() < 0.3: # 30% chance for a column to have NaNs
-            nan_indices = df.sample(frac=0.01).index # Corrupt 1% of the data
-            df.loc[nan_indices, col] = np.nan
     
     df.to_csv(filename, index=False)
-    print(f"Successfully generated '{filename}' with {len(df)} data points and expanded subsystems.")
+    print(f"Successfully generated '{filename}' with a new Nordic flight path.")
 
 if __name__ == "__main__":
     generate_flight_data()
