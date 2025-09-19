@@ -1,99 +1,184 @@
+import base64
+import io
 import pandas as pd
 import numpy as np
-import datetime
 
-def generate_flight_data(filename="flight_data_nordic.csv"):
-    """
-    Generates an updated, more realistic flight data CSV file.
+import dash
+from dash import dcc, html, Input, Output, State, no_update
+import dash_bootstrap_components as dbc
+import plotly.graph_objects as go
+import re
 
-    This version features a multi-leg flight path over the Nordic region
-    and is specifically designed to create dynamic, sustained communication link outages.
-    """
-    print("Generating new Nordic flight data with sustained comm outages...")
+from data_parser import load_and_validate_data
 
-    # --- Simulation Parameters ---
-    total_duration_seconds = 9000  # 2.5-hour flight
-    data_points = total_duration_seconds * 2 # 2 Hz data rate
-    start_time = datetime.datetime(2025, 10, 22, 8, 0, 0)
-    time = np.linspace(0, total_duration_seconds, data_points)
+mapbox_access_token = "pk.eyJ1IjoicXlyb3dyZW4iLCJhIjoiY21mcGg4cjVpMGY1dTJrcjRuYmo1YWl3ZCJ9.YlqTfqH9P954mOz6C1lLDA"
+
+app = dash.Dash(__name__, external_stylesheets=[dbc.themes.CYBORG])
+server = app.server
+
+def card(children, **kwargs):
+    return dbc.Card(dbc.CardBody(children), **kwargs)
+
+app.layout = dbc.Container(fluid=True, children=[
+    dcc.Store(id='dataframe-store'),
+    html.H1("Aerospace Flight Data Analyzer", className="text-center my-4 text-primary"),
+    dbc.Row([
+        dbc.Col(width=4, children=[
+            card([
+                html.H4("Control Panel", className="card-title"),
+                dcc.Upload(id='upload-data', children=html.Div(['Drag and Drop or ', html.A('Select a Flight Data File')]), style={'width': '100%','height': '60px','lineHeight': '60px','borderWidth': '1px','borderStyle': 'dashed','borderRadius': '5px','textAlign': 'center','margin': '10px 0'}),
+                html.Div(id='upload-status')
+            ]),
+            # --- BUG FIX WAS HERE: Added empty list [] as children ---
+            card([], id='parser-report-card', className="mt-4", style={'display': 'none'}),
+            card([], id='plot-controls-card', className="mt-4", style={'display': 'none'}),
+            card([], id='comm-outage-card', className="mt-4", style={'display': 'none'}),
+            
+            card(id='scatter-3d-controls-card', className="mt-4", style={'display': 'none'}, children=[
+                html.H4("3D Scatter Plot Controls", className="card-title"),
+                html.Label("X-Axis:"),
+                dcc.Dropdown(id='x-axis-selector', value='POS_Longitude_deg'),
+                html.Label("Y-Axis:", className="mt-2"),
+                dcc.Dropdown(id='y-axis-selector', value='POS_Latitude_deg'),
+                html.Label("Z-Axis:", className="mt-2"),
+                dcc.Dropdown(id='z-axis-selector', value='POS_Altitude_ft'),
+                html.Label("Color By:", className="mt-2"),
+                dcc.Dropdown(id='color-selector', value='COMM_TCDL_Margin_dB'),
+            ])
+        ]),
+        dbc.Col(width=8, children=[
+            card([
+                dbc.Tabs(id="tabs", active_tab="tab-map", children=[
+                    # --- BUG FIX WAS HERE: Added empty placeholders for tab content ---
+                    dbc.Tab(dcc.Graph(id='main-graph', style={'height': '80vh'}), label="Telemetry Plots", tab_id="tab-2d"),
+                    dbc.Tab(dcc.Graph(id='map-graph', style={'height': '80vh'}), label="Flight Path Map", tab_id="tab-map"),
+                    dbc.Tab(dcc.Graph(id='scatter-3d-graph', style={'height': '80vh'}), label="3D Scatter Plot", tab_id="tab-3d"),
+                ])
+            ])
+        ])
+    ])
+])
+
+# --- Combined Callback for all UI updates on file upload ---
+@app.callback(
+    [Output('dataframe-store', 'data'), Output('upload-status', 'children'),
+     Output('parser-report-card', 'children'), Output('parser-report-card', 'style'),
+     Output('plot-controls-card', 'children'), Output('plot-controls-card', 'style'),
+     Output('comm-outage-card', 'children'), Output('comm-outage-card', 'style'),
+     Output('scatter-3d-controls-card', 'style'),
+     Output('x-axis-selector', 'options'), Output('y-axis-selector', 'options'),
+     Output('z-axis-selector', 'options'), Output('color-selector', 'options')],
+    Input('upload-data', 'contents'), State('upload-data', 'filename')
+)
+def process_upload_and_update_ui(contents, filename):
+    if contents is None:
+        return [no_update] * 13
+
+    content_type, content_string = contents.split(',')
+    decoded = base64.b64decode(content_string)
+    try:
+        df, report = load_and_validate_data(io.StringIO(decoded.decode('utf-8')))
+        
+        if df is None or df.empty:
+            status = html.Div(f"Error: Parser failed for {filename}.", className="text-danger")
+            return no_update, status, [], {'display': 'none'}, [], {'display': 'none'}, [], {'display': 'none'}, {'display': 'none'}, [], [], [], []
+
+        status = html.Div(f"Loaded: {filename}", className="text-success")
+        
+        # --- Build UI Components ---
+        report_children = [html.H4("Data Validation Report"), html.P(f"Status: {report['status']}")]
+        plot_controls_children = [html.H4("Plotting Controls"), html.Label("Select Subsystems:"), dcc.Checklist(id='subsystem-checklist', options=[{'label': s, 'value': s} for s in report.get('subsystems_found', [])], labelStyle={'display': 'block'})]
+        
+        comm_link_cols = [col for col in df.columns if col.startswith('COMM_') and col.endswith('_dB')]
+        comm_link_options = [{'label': re.search('COMM_(.*)_Margin_dB', col).group(1), 'value': col} for col in comm_link_cols]
+        comm_outage_children = [
+            html.H4("Comm Link Analysis"), html.Label("Show outages for link:"),
+            dcc.Dropdown(id='comm-link-selector', options=comm_link_options, placeholder="Select a link..."),
+            html.Label("Outage Threshold (dB):", className="mt-2"),
+            dcc.Input(id='outage-threshold-input', type='number', value=3, step=0.5, className="w-100")
+        ]
+        
+        numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
+        axis_options = [{'label': col, 'value': col} for col in numeric_cols]
+
+        return (df.to_json(orient='split'), status,
+                report_children, {'display': 'block', 'marginTop': '1rem'},
+                plot_controls_children, {'display': 'block', 'marginTop': '1rem'},
+                comm_outage_children, {'display': 'block', 'marginTop': '1rem'},
+                {'display': 'block', 'marginTop': '1rem'},
+                axis_options, axis_options, axis_options, axis_options)
+
+    except Exception as e:
+        status = html.Div(f"An error occurred: {e}", className="text-danger")
+        return no_update, status, [], {'display': 'none'}, [], {'display': 'none'}, [], {'display': 'none'}, {'display': 'none'}, [], [], [], []
+
+
+# --- Callbacks for each graph ---
+@app.callback(Output('main-graph', 'figure'),
+              Input('subsystem-checklist', 'value'), State('dataframe-store', 'data'))
+def update_2d_graph(selected_subsystems, json_data):
+    if not selected_subsystems or not json_data: return go.Figure().update_layout(template="plotly_dark", title_text="Select a subsystem to begin analysis")
+    df = pd.read_json(io.StringIO(json_data), orient='split')
+    fig = go.Figure()
+    for subsystem in selected_subsystems:
+        subsystem_cols = [col for col in df.columns if col.startswith(f"{subsystem}_")]
+        for col in subsystem_cols: fig.add_trace(go.Scatter(x=df['Timestamp'], y=df[col], mode='lines', name=col))
+    return fig.update_layout(title="Subsystem Telemetry Over Time", template="plotly_dark")
+
+@app.callback(Output('map-graph', 'figure'),
+              [Input('dataframe-store', 'data'), Input('comm-link-selector', 'value'), Input('outage-threshold-input', 'value')])
+def update_map_graph(json_data, selected_comm_link, outage_threshold):
+    if not json_data: return go.Figure(go.Scattermapbox()).update_layout(template="plotly_dark", mapbox_style="dark", mapbox_accesstoken=mapbox_access_token, mapbox_center_lon=10.75, mapbox_center_lat=59.9)
+    df = pd.read_json(io.StringIO(json_data), orient='split')
+    map_traces = []
+    if selected_comm_link and outage_threshold is not None:
+        df['is_outage'] = df[selected_comm_link] < outage_threshold
+        map_traces.append(go.Scattermapbox(name="Link OK", mode="lines", lon=df[~df['is_outage']]['POS_Longitude_deg'], lat=df[~df['is_outage']]['POS_Latitude_deg'], line=dict(width=4, color='#1F77B4')))
+        map_traces.append(go.Scattermapbox(name="Link Outage", mode="lines", lon=df[df['is_outage']]['POS_Longitude_deg'], lat=df[df['is_outage']]['POS_Latitude_deg'], line=dict(width=5, color='#DC3545')))
+    else:
+        map_traces.append(go.Scattermapbox(name="Flight Path", mode="lines", lon=df['POS_Longitude_deg'], lat=df['POS_Latitude_deg'], line=dict(width=4, color='#FF851B')))
+    return go.Figure(data=map_traces).update_layout(template="plotly_dark", mapbox_style="satellite-streets", mapbox_accesstoken=mapbox_access_token, mapbox_center_lon=df['POS_Longitude_deg'].mean(), mapbox_center_lat=df['POS_Latitude_deg'].mean(), mapbox_zoom=6)
+
+@app.callback(
+    Output('scatter-3d-graph', 'figure'),
+    [Input('x-axis-selector', 'value'), Input('y-axis-selector', 'value'),
+     Input('z-axis-selector', 'value'), Input('color-selector', 'value')],
+    State('dataframe-store', 'data')
+)
+def update_3d_scatter(x_axis, y_axis, z_axis, color_axis, json_data):
+    if not all([x_axis, y_axis, z_axis, color_axis, json_data]):
+        return go.Figure().update_layout(template="plotly_dark", title_text="Select axes and color parameters to generate a 3D plot")
+
+    df = pd.read_json(io.StringIO(json_data), orient='split')
     
-    # --- Base Flight Profile (Altitude) ---
-    altitude = np.zeros(data_points)
-    climb_end_idx = int(data_points * 0.1)
-    cruise_start_idx = climb_end_idx
-    cruise_end_idx = int(data_points * 0.9)
-    descent_start_idx = cruise_end_idx
+    df_scatter = df.iloc[::20, :].copy()
 
-    altitude[:climb_end_idx] = 50000 * np.sin(np.pi/2 * time[:climb_end_idx] / time[climb_end_idx-1])
-    altitude[cruise_start_idx:cruise_end_idx] = 50000 + np.sin(time[cruise_start_idx:cruise_end_idx]/200) * 150
-    descent_duration = time[-1] - time[descent_start_idx-1]
-    altitude[descent_start_idx:] = 50000 * (1 - (time[descent_start_idx:] - time[descent_start_idx-1]) / descent_duration)
-    altitude[altitude < 0] = 0
+    fig = go.Figure(data=[go.Scatter3d(
+        x=df_scatter[x_axis],
+        y=df_scatter[y_axis],
+        z=df_scatter[z_axis],
+        mode='markers',
+        marker=dict(
+            size=4,
+            color=df_scatter[color_axis],
+            colorscale='Viridis',
+            showscale=True,
+            colorbar_title_text=color_axis.replace('_', ' ')
+        )
+    )])
 
-    # --- Realistic Multi-Leg Flight Path (Position) ---
-    # Start near Oslo, Norway
-    start_lat, start_lon = 59.9, 10.75
-    lat = np.full(data_points, start_lat)
-    lon = np.full(data_points, start_lon)
-    
-    # Leg 1: Fly South-West (20% of flight)
-    leg1_end_idx = int(data_points * 0.20)
-    lon[:leg1_end_idx] = np.linspace(start_lon, 8.0, leg1_end_idx)
-    lat[:leg1_end_idx] = np.linspace(start_lat, 58.5, leg1_end_idx)
+    fig.update_layout(
+        template="plotly_dark",
+        title=f"3D Analysis: {z_axis} vs. {x_axis} and {y_axis}",
+        scene=dict(
+            xaxis_title=x_axis.replace('_', ' '),
+            yaxis_title=y_axis.replace('_', ' '),
+            zaxis_title=z_axis.replace('_', ' ')
+        ),
+        margin=dict(l=0, r=0, b=0, t=40)
+    )
+    return fig
 
-    # Leg 2: Turn and fly South-East (from 20% to 60%)
-    leg2_end_idx = int(data_points * 0.60)
-    lon[leg1_end_idx:leg2_end_idx] = np.linspace(lon[leg1_end_idx-1], 11.0, leg2_end_idx - leg1_end_idx)
-    lat[leg1_end_idx:leg2_end_idx] = np.linspace(lat[leg1_end_idx-1], 57.0, leg2_end_idx - leg1_end_idx)
-
-    # Leg 3: Second turn, fly West (from 60% to 90%)
-    leg3_end_idx = int(data_points * 0.90)
-    # --- BUG FIX WAS HERE ---
-    lon[leg2_end_idx:leg3_end_idx] = np.linspace(lon[leg2_end_idx-1], 8.5, leg3_end_idx - leg2_end_idx)
-    lat[leg2_end_idx:leg3_end_idx] = np.linspace(lat[leg2_end_idx-1], 57.2, leg3_end_idx - leg2_end_idx)
-    
-    # Final leg: Descend towards destination
-    lon[leg3_end_idx:] = np.linspace(lon[leg3_end_idx-1], 8.3, len(lon) - leg3_end_idx)
-    lat[leg3_end_idx:] = np.linspace(lat[leg3_end_idx-1], 57.1, len(lat) - leg3_end_idx)
-
-    # --- GNC (with sharp turns) ---
-    roll = np.random.randn(data_points) * 0.5
-    turn1_indices = slice(leg1_end_idx - 100, leg1_end_idx + 100)
-    roll[turn1_indices] = 30 * np.sin(np.pi * np.linspace(0, 1, 200))
-    turn2_indices = slice(leg2_end_idx - 100, leg2_end_idx + 100)
-    roll[turn2_indices] = -25 * np.sin(np.pi * np.linspace(0, 1, 200))
-
-    # --- Communications Links (Sustained Outages) ---
-    # TCDL (Satellite) Link - Sustained outage during the entire second leg
-    tcdl_margin = 15 + np.random.randn(data_points) * 0.2
-    tcdl_outage_indices = slice(leg1_end_idx, leg2_end_idx)
-    tcdl_margin[tcdl_outage_indices] = -5 + np.random.randn(leg2_end_idx - leg1_end_idx) * 0.5 # Deep outage
-    
-    # LOS (Line-of-Sight) Link - Degrades sharply with distance
-    distance_from_start = np.sqrt((lon - start_lon)**2 + (lat - start_lat)**2)
-    los_margin = 20 * (altitude/50000) - (distance_from_start * 8) + np.random.randn(data_points) * 0.3 # More aggressive degradation
-    los_margin[los_margin < 0] = 0
-
-    # --- Other Subsystems (Simplified for this update) ---
-    engine_rpm = 9500 + (altitude/50000 * 1000) + np.random.randn(data_points) * 50
-    bus_a_voltage = 28.0 + np.random.randn(data_points) * 0.1
-
-    # --- DataFrame Assembly ---
-    timestamps = [start_time + datetime.timedelta(seconds=int(s)) for s in time]
-    
-    df = pd.DataFrame({
-        'Timestamp': timestamps,
-        'POS_Latitude_deg': lat, 'POS_Longitude_deg': lon, 'POS_Altitude_ft': altitude,
-        'GNC_Roll_deg': roll,
-        'PROP_Engine_RPM': engine_rpm,
-        'POWER_BusA_Voltage_V': bus_a_voltage,
-        'COMM_TCDL_Margin_dB': tcdl_margin,
-        'COMM_LOS_Margin_dB': los_margin,
-    })
-    
-    df.to_csv(filename, index=False)
-    print(f"Successfully generated '{filename}' with a new Nordic flight path.")
-
-if __name__ == "__main__":
-    generate_flight_data()
+if __name__ == '__main__':
+    app.run(debug=True)
 
