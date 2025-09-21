@@ -1,3 +1,7 @@
 venv/
 __pycache__/
 *.csv
+
+# Build artifacts and distribution files
+/build/
+/dist/
