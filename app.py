@@ -30,6 +30,7 @@ app.layout = dbc.Container(fluid=True, children=[
                 html.Div(id='upload-status')
             ]),
             card([], id='parser-report-card', className="mt-4", style={'display': 'none'}),
+            card([], id='summary-report-card', className="mt-4", style={'display': 'none'}),
             card([], id='plot-controls-card', className="mt-4", style={'display': 'none'}),
             card([], id='comm-outage-card', className="mt-4", style={'display': 'none'}),
             
@@ -57,10 +58,80 @@ app.layout = dbc.Container(fluid=True, children=[
     ])
 ])
 
+def generate_summary_report(df, outage_threshold_db=3.0):
+    """Analyzes the dataframe to produce a summary report on links and subsystems."""
+    
+    # --- 1. Communication Link Analysis ---
+    comm_cols = [col for col in df.columns if col.startswith('COMM_') and col.endswith('_dB')]
+    link_rows = []
+    if comm_cols:
+        for link in comm_cols:
+            link_name = re.search('COMM_(.*)_dB', link).group(1).replace('_', ' ')
+            outages = df[link] < outage_threshold_db
+            total_duration_sec = (df['Timestamp'].iloc[-1] - df['Timestamp'].iloc[0]).total_seconds()
+            outage_duration_sec = df['Timestamp'][outages].diff().dt.total_seconds().sum()
+            
+            link_rows.append(html.Tr([
+                html.Td(link_name),
+                html.Td(f"{df[link].mean():.2f} dB"),
+                html.Td(f"{df[link].min():.2f} dB"),
+                html.Td(f"{outage_duration_sec:.1f} sec")
+            ]))
+    
+    comm_table = dbc.Table([
+        html.Thead(html.Tr([html.Th("Link"), html.Th("Avg Margin"), html.Th("Min Margin"), html.Th("Outage Time")])),
+        html.Tbody(link_rows)
+    ], bordered=True, striped=True, hover=True, responsive=True)
+
+    # --- 2. Subsystem Health (based on data availability) ---
+    subsystems, _ = discover_subsystems(df.columns)
+    subsystem_rows = []
+    if subsystems:
+        for sys in subsystems:
+            sys_cols = [col for col in df.columns if col.startswith(f"{sys}_")]
+            # Calculate the percentage of non-null values for all columns of a subsystem
+            data_availability = df[sys_cols].notna().mean().mean() * 100
+            subsystem_rows.append(html.Tr([
+                html.Td(sys),
+                html.Td(f"{data_availability:.1f}%")
+            ]))
+
+    subsystem_table = dbc.Table([
+        html.Thead(html.Tr([html.Th("Subsystem"), html.Th("Data Availability")])),
+        html.Tbody(subsystem_rows)
+    ], bordered=True, striped=True, hover=True, responsive=True, className="mt-3")
+
+    report_children = [
+        html.H4("Flight Summary Report", className="card-title"),
+        html.H5("Communication Links", className="mt-3"),
+        comm_table,
+        html.H5("Subsystem Health", className="mt-3"),
+        subsystem_table
+    ]
+    
+    return report_children
+
+# Helper function to find subsystems (can be copied from data_parser.py or imported)
+def discover_subsystems(df_columns):
+    """Dynamically identifies subsystems from column prefixes."""
+    subsystems = set()
+    prefix_pattern = re.compile(r'^([A-Z0-9]+)_')
+    for col in df_columns:
+        match = prefix_pattern.match(col)
+        if match:
+            prefix = match.group(1)
+            # Exclude specific prefixes if they aren't true subsystems
+            if prefix not in ['COMM', 'POS']:
+                 subsystems.add(prefix)
+    return sorted(list(subsystems)), []
+
+
 # --- Combined Callback for all UI updates on file upload ---
 @app.callback(
     [Output('dataframe-store', 'data'), Output('upload-status', 'children'),
      Output('parser-report-card', 'children'), Output('parser-report-card', 'style'),
+     # ADD THE OUTPUTS FOR THE NEW SUMMARY CARD HERE
+     Output('summary-report-card', 'children'), Output('summary-report-card', 'style'),
      Output('plot-controls-card', 'children'), Output('plot-controls-card', 'style'),
      Output('comm-outage-card', 'children'), Output('comm-outage-card', 'style'),
      Output('scatter-3d-controls-card', 'style'),
@@ -69,8 +140,9 @@ app.layout = dbc.Container(fluid=True, children=[
     Input('upload-data', 'contents'), State('upload-data', 'filename')
 )
 def process_upload_and_update_ui(contents, filename):
+    # The number of outputs is now 15, so update this line
     if contents is None:
-        return [no_update] * 13
+        return [no_update] * 15
 
     content_type, content_string = contents.split(',')
     decoded = base64.b64decode(content_string)
@@ -79,12 +151,17 @@ def process_upload_and_update_ui(contents, filename):
         
         if df is None or df.empty:
             status = html.Div(f"Error: Parser failed for {filename}.", className="text-danger")
-            return no_update, status, [], {'display': 'none'}, [], {'display': 'none'}, [], {'display': 'none'}, {'display': 'none'}, [], [], [], []
+            # Update the number of return values in case of error
+            return [no_update, status] + [[], {'display': 'none'}] * 6 + [[], [], [], []]
 
         status = html.Div(f"Loaded: {filename}", className="text-success")
         
         # --- Build UI Components ---
         report_children = [html.H4("Data Validation Report", className="card-title"), html.P(f"Status: {report['status']}")]
+        
+        # CALL THE NEW REPORT GENERATOR
+        summary_report_children = generate_summary_report(df)
+
         plot_controls_children = [html.H4("Plotting Controls", className="card-title"), html.Label("Select Subsystems:"), dcc.Checklist(id='subsystem-checklist', options=[{'label': s, 'value': s} for s in report.get('subsystems_found', [])], labelStyle={'display': 'block'})]
         
         comm_link_cols = [col for col in df.columns if col.startswith('COMM_') and col.endswith('_dB')]
@@ -99,8 +176,10 @@ def process_upload_and_update_ui(contents, filename):
         numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
         axis_options = [{'label': col, 'value': col} for col in numeric_cols]
 
+        # ADD THE NEW REPORT CHILDREN AND STYLE TO THE RETURN TUPLE
         return (df.to_json(orient='split'), status,
                 report_children, {'display': 'block', 'marginTop': '1rem'},
+                summary_report_children, {'display': 'block', 'marginTop': '1rem'},
                 plot_controls_children, {'display': 'block', 'marginTop': '1rem'},
                 comm_outage_children, {'display': 'block', 'marginTop': '1rem'},
                 {'display': 'block', 'marginTop': '1rem'},
@@ -108,7 +187,16 @@ def process_upload_and_update_ui(contents, filename):
 
     except Exception as e:
         status = html.Div(f"An error occurred: {e}", className="text-danger")
-        return no_update, status, [], {'display': 'none'}, [], {'display': 'none'}, [], {'display': 'none'}, {'display': 'none'}, [], [], [], []
+        # Update the number of return values in case of exception
+    return (
+        no_update, status,             # 1. dataframe-store, 2. upload-status
+        [], {'display': 'none'},       # 3–4 parser report
+        [], {'display': 'none'},       # 5–6 summary report
+        [], {'display': 'none'},       # 7–8 plot controls
+        [], {'display': 'none'},       # 9–10 comm outage
+        {'display': 'none'},           # 11 scatter 3d controls
+        [], [], [], []                 # 12–15 axis selectors
+    )
 
 
 # --- Callbacks for each graph ---
